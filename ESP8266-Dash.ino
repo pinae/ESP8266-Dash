@@ -1,4 +1,3 @@
-
 #include <ESP8266WiFi.h>
 
 /************************* WiFi Access Point *********************************/
@@ -27,10 +26,20 @@ void setup() {
   digitalWrite(LED, LOW);
   Serial1.println("Starting Wifi connection...");
   WiFi.begin(WLAN_SSID, WLAN_PASS);
+  int failcounter = 300;
+  Serial1.print("Waiting for a connection");
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial1.println("Waiting for a connection...");
+    delay(100);
+    Serial1.print(".");
+    if (failcounter <= 0) {
+      Serial1.println();
+      Serial1.println("Giving up.");
+      blinkError();
+      shutdown();
+    }
+    failcounter--;
   }
+  Serial1.println();
   digitalWrite(LED, HIGH);
   Serial1.println("Wifi connected.");
   // connect to host
@@ -52,8 +61,11 @@ void setup() {
                  "Host: " + host + "\r\n" +
                  "Connection: close\r\n" +
                  "\r\n");
+    blinkSent();
+    delay(500);
     // get response
     int success = 0;
+    failcounter = 10000;
     while (client.connected()) {
       if (client.available()) {
         String line = client.readStringUntil('\n');
@@ -63,10 +75,17 @@ void setup() {
           success = 1;
         }
       }
+      if (failcounter <= 0) {
+        blinkError();
+        shutdown();
+      }
+      failcounter--;
     }
-    if (! success) {
+    if (success) {
+      blinkSuccess();
+    } else {
       Serial1.println("Got no success message.");
-      blink();
+      blinkError();
     }
     // close connection
     Serial1.println("Successfully closing the connection.");
@@ -88,16 +107,35 @@ void verifyFingerprint() {
   if (! client.verify(FINGERPRINT, CERT_NAME)) {
     Serial1.println("ERROR: Incorrect certificate signature!");
     // Connection insecure!
+    blinkError();
     shutdown();
   }
 }
 
-void blink() {
-  for (int i = 0; i < 30; i++) {
+void blinkSuccess() {
+  for (int i = 4; i < 50; i=(5*i) >> 2) {
     digitalWrite(LED, HIGH);   // turn the LED off
-    delay(150);                        // wait
+    delay(10*i);               // wait
     digitalWrite(LED, LOW);    // turn the LED on
-    delay(150);                        // wait
+    delay(10*i);               // wait
+  }
+}
+
+void blinkError() {
+  for (int i = 0; i < 28; i++) {
+    digitalWrite(LED, HIGH);   // turn the LED off
+    delay(125);                        // wait
+    digitalWrite(LED, LOW);    // turn the LED on
+    delay(125);                        // wait
+  }
+}
+
+void blinkSent() {
+  for (int i = 0; i < 2; i++) {
+    digitalWrite(LED, LOW);   // turn the LED on
+    delay(200);                        // wait
+    digitalWrite(LED, HIGH);    // turn the LED off
+    delay(200);                        // wait
   }
 }
 
@@ -105,10 +143,8 @@ void shutdown() {
   Serial1.println("Shutting down.");
   Serial1.println("Going to sleep.");
   ESP.deepSleep(0);
-  delay(100);
   Serial1.println("Sleep failed.");
   while(1) {
-    blink();
+    blinkError();
   }
 }
-
