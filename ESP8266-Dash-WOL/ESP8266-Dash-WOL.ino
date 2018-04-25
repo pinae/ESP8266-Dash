@@ -1,91 +1,114 @@
-#include <ESP8266WiFi.h>          //https://github.com/esp8266/Arduino
+//include dependencies, create objects and variables
+#include "dependencies.h"
 
-//needed for library
-#include <ESP8266WebServer.h>
-#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
+//show WifiManager debug output
+bool debugOutput = true;
 
-#include <AsyncMqttClient.h>
-
-AsyncMqttClient mqttClient;
-char mqtt_server[40];
-char device_name[40];
-char mqtt_port[6] = "1883";
-char onfig_enable_topic[100] = "cmnd/espdash/config_enable";
-
-#define LED             2
 void setup() {
-	// put your setup code here, to run once:
-	Serial1.begin(115200);
-	Serial1.println();
-	Serial1.println("Initializing outputs...");
-	pinMode(LED, OUTPUT);
-	digitalWrite(LED, LOW);
-	WiFiManager wifiManager;
-	wifiManager.resetSettings();
 
-	WiFiManagerParameter custom_device_name("name", "device_name", device_name, 40);
-	WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, 40);
-	WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 5);
-	WiFiManagerParameter custom_mac_address("mac", "mac_address", mac_address, 5);
-	wifiManager.addParameter(&custom_mqtt_server);
-	wifiManager.addParameter(&custom_mqtt_port);
-	wifiManager.autoConnect();
-	byte mac[] = { 0xFR, 0xBB, 0x34, 0xE5, 0x29, 0xFC };
+  Serial.begin(115200);
 
-	IPAddress computer_ip(192, 168, 178, 26); 
+  //load config from SPIFFS
+  loadConfig();
 
-	WakeOnLan::sendWOL(computer_ip, UDP, mac, sizeof mac);
-	/*wifiManager.startConfigPortal("OnDemandAP");*/
-	mqttClient.setServer(mqtt_server, atoi(mqtt_port));
-	mqttClient.onConnect(onMqttConnect);
-	/*mqttClient.onDisconnect(onMqttDisconnect);*/
-	/*mqttClient.onSubscribe(onMqttSubscribe);*/
-	/*mqttClient.onMessage(onMqttMessage);*/
-	mqttClient.connect();
+  //Set WiFi hostname to the configured device name
+  WiFi.hostname(device_name);
+
+  //Enable WifiManager Debug Output
+  wifiManager.setDebugOutput(debugOutput);
+  
+  //Set custom WifiManager paramters
+  WiFiManagerParameter custom_device_name("name", "Device Name", device_name, 40);
+  WiFiManagerParameter custom_mqtt_server("server", "MQTT Server", mqtt_server, 40);
+  WiFiManagerParameter custom_mqtt_port("port", " Port", mqtt_port, 6);
+  WiFiManagerParameter custom_mqtt_user("username", "MQTT Username", mqtt_user, 34);
+  WiFiManagerParameter custom_mqtt_pass("passwort", "MQTT Password", mqtt_pass, 34);
+  WiFiManagerParameter custom_mqtt_topic("topic", "MQTT Topic", mqtt_topic, 120);
+  WiFiManagerParameter custom_mqtt_payload("payload", "MQTT Payload", mqtt_payload, 40);
+  WiFiManagerParameter custom_mac_address("mac", "PCs MAC-Address", mac_address, 18);
+
+  //Set callback to save the WifiManager config to SPIFFS
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+  //Add the Parameters to the webinterface
+  wifiManager.addParameter(&custom_device_name);
+  wifiManager.addParameter(&custom_mqtt_server);
+  wifiManager.addParameter(&custom_mqtt_port);
+  wifiManager.addParameter(&custom_mqtt_user);
+  wifiManager.addParameter(&custom_mqtt_pass);
+  wifiManager.addParameter(&custom_mqtt_topic);
+  wifiManager.addParameter(&custom_mqtt_payload);
+  wifiManager.addParameter(&custom_mac_address);
+
+  //Connect to WiFi and
+  if (! wifiManager.autoConnect()) {
+    delay(3000);
+    //reset and try again, or maybe put it to deep sleep
+    ESP.restart();
+    delay(5000);
+  }
+  
+  //Attach the shutdown function every 5 seconds, so the battery isn't depleted when the ESP hangs for some reason.
+  sleepTicker.attach(5, shutdown);
+
+  //Copy WifiManager values to the corresponding variables
+  strcpy(device_name, custom_device_name.getValue());
+  strcpy(mqtt_server, custom_mqtt_server.getValue());
+  strcpy(mqtt_port, custom_mqtt_port.getValue());
+  strcpy(mqtt_user, custom_mqtt_user.getValue());
+  strcpy(mqtt_pass, custom_mqtt_pass.getValue());
+  strcpy(mqtt_topic, custom_mqtt_topic.getValue());
+  strcpy(mqtt_payload, custom_mqtt_payload.getValue());
+  strcpy(mac_address, custom_mac_address.getValue());
+
+  //Save the config data to SPIFFS if neccessary
+  if (shouldSaveConfig) {
+    saveConfig();
+  }
+
+  //Configure the MQTT-Client
+  mqttClient.setServer(mqtt_server, atoi(mqtt_port));
+  mqttClient.setCredentials(mqtt_user, mqtt_pass);
+  mqttClient.setClientId(device_name);
+  //Add callback to call if the client is connected
+  mqttClient.onConnect(onMqttConnect);
+  //Add callback to call if the client receives a message
+  mqttClient.onMessage(onMqttMessage);
+
+  //Try to connect to MQTT server
+  mqttClient.connect();
+
+  //Enable Arduino OTA for the device. Copied verbatim from the example
+  ArduinoOTA.setHostname(device_name);
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH)
+      type = "sketch";
+    else {
+      type = "filesystem";
+      SPIFFS.end();
+    }
+    Serial.println("Start updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+  ArduinoOTA.begin();
+
 }
-
-
-void onMqttConnect(bool sessionPresent) {
-  uint16_t packetIdSub = mqttClient.subscribe("test/lol", 2);
 
 void loop() {
-	// this should never be reached.
-}
-
-
-void blinkSuccess() {
-	for (int i = 4; i < 50; i=(5*i) >> 2) {
-		digitalWrite(LED, HIGH);   // turn the LED off
-		delay(10*i);               // wait
-		digitalWrite(LED, LOW);    // turn the LED on
-		delay(10*i);               // wait
-	}
-}
-
-void blinkError() {
-	for (int i = 0; i < 28; i++) {
-		digitalWrite(LED, HIGH);   // turn the LED off
-		delay(125);                        // wait
-		digitalWrite(LED, LOW);    // turn the LED on
-		delay(125);                        // wait
-	}
-}
-
-void blinkSent() {
-	for (int i = 0; i < 2; i++) {
-		digitalWrite(LED, LOW);   // turn the LED on
-		delay(200);                        // wait
-		digitalWrite(LED, HIGH);    // turn the LED off
-		delay(200);                        // wait
-	}
-}
-
-void shutdown() {
-	Serial1.println("Shutting down.");
-	Serial1.println("Going to sleep.");
-	ESP.deepSleep(0);
-	Serial1.println("Sleep failed.");
-	while(1) {
-		blinkError();
-	}
+  // Handle OTA requests
+  ArduinoOTA.handle();
 }
